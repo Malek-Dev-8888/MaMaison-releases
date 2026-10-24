@@ -4,7 +4,7 @@
 #  l'autre (sorties, capteurs) se règle dans appareil.json, modifiable
 #  depuis l'appli (Options avancées > Configuration).
 # =====================================================================
-VERSION = "2.1"
+VERSION = "2.2"
 
 import time
 import os
@@ -23,7 +23,31 @@ MQTT_PORT = 1883
 
 DEVICE_ID = ubinascii.hexlify(unique_id()).decode()[-6:]
 CLIENT_ID = ("esp32_" + DEVICE_ID).encode()
-RACINE = "mon_projet_unique/esp"
+
+# Code maison : chaque maison a ses propres topics. Vide = la maison d'origine.
+FICHIER_MAISON = "maison.json"
+_CARACTERES_CODE = "abcdefghijklmnopqrstuvwxyz0123456789-"
+
+
+def code_valide(c):
+    return isinstance(c, str) and len(c) <= 32 and all(ch in _CARACTERES_CODE for ch in c)
+
+
+def _lire_code_maison():
+    try:
+        with open(FICHIER_MAISON) as f:
+            c = str(json.load(f).get("code", "")).strip().lower()
+    except Exception:
+        return ""
+    return c if code_valide(c) else ""
+
+
+def racine_maison(code):
+    return "mon_projet_unique/esp" if not code else "mon_projet_unique/m/" + code + "/esp"
+
+
+CODE_MAISON = _lire_code_maison()
+RACINE = racine_maison(CODE_MAISON)
 BASE = RACINE + "/" + DEVICE_ID
 
 
@@ -375,6 +399,25 @@ def repondre(cmd, ok, message=""):
     publier(T_REPONSE, json.dumps({"cmd": cmd, "ok": ok, "message": message}))
 
 
+def quitter_maison():
+    """Efface les messages retenus de la maison actuelle (l'appareil n'y apparaîtra plus)."""
+    sujets = [T_IP, T_RESEAUX, T_CONFIG, T_VERSION]
+    for sid in ordre_sorties:
+        sujets.append(topic(sid + "/status"))
+        if sid in thermostats:
+            sujets.append(topic(sid + "/consigne"))
+            sujets.append(topic(sid + "/chauffe"))
+    for cid, _ in capteurs:
+        sujets.append(topic(cid + "/valeur"))
+    sujets.append(T_DISPO)
+    for t in sujets:
+        publier(t, b"", True)
+    try:
+        client.disconnect()   # déconnexion propre : pas de message « offline » laissé derrière
+    except Exception:
+        pass
+
+
 def redemarrer():
     publier(T_DISPO, b"offline", True)
     try:
@@ -456,6 +499,17 @@ def traiter_admin(msg):
     elif cmd == "redemarrer":
         repondre(cmd, True, "Redémarrage")
         redemarrer()
+
+    elif cmd == "maison":
+        code = str(d.get("code", "")).strip().lower()
+        if not code_valide(code):
+            repondre(cmd, False, "Code maison invalide")
+            return
+        ecrire_json(FICHIER_MAISON, {"code": code})
+        repondre(cmd, True, "Déplacé, redémarrage")
+        quitter_maison()
+        time.sleep(1)
+        reset()
 
     elif cmd == "mode_config":
         open(FLAG_AP, "w").close()
@@ -719,10 +773,10 @@ def page_html():
 <script>
  function envoyer(e){
   e.preventDefault();
-  var s=document.getElementById('s').value, p=document.getElementById('p').value;
+  var s=document.getElementById('s').value, p=document.getElementById('p').value, m=document.getElementById('m').value;
   document.getElementById('b').innerText='Envoi…';
   fetch('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-   body:'ssid='+encodeURIComponent(s)+'&password='+encodeURIComponent(p)})
+   body:'ssid='+encodeURIComponent(s)+'&password='+encodeURIComponent(p)+'&maison='+encodeURIComponent(m)})
   .finally(function(){
    var c=document.getElementById('c'); c.innerHTML='<h2>C\\'est enregistré</h2><p>L\\'appareil redémarre. Tu peux fermer cette page.</p>';
    setTimeout(function(){window.close();},1500);
@@ -735,6 +789,8 @@ def page_html():
 <select onchange="document.getElementById('s').value=this.value"><option value=''>Choisir…</option>""" + options + """</select>
 <label>Nom du Wi-Fi</label><input id='s' required>
 <label>Mot de passe</label><input id='p' type='password'>
+<label>Code maison <small>(laisser tel quel si tu ne sais pas)</small></label>
+<input id='m' value='""" + echapper(CODE_MAISON) + """' autocapitalize='off' autocomplete='off'>
 <button id='b'>Enregistrer</button>
 </form></div></body></html>"""
 
@@ -753,6 +809,10 @@ def gerer_client_web():
             ssid = champs.get("ssid", "").strip()
             if ssid:
                 ajouter_wifi(ssid, champs.get("password", "").strip())
+                if "maison" in champs:
+                    code = champs["maison"].strip().lower()
+                    if code_valide(code) and code != CODE_MAISON:
+                        ecrire_json(FICHIER_MAISON, {"code": code})
                 envoyer(conn, "200 OK", "text/plain", "OK")
                 conn.close()
                 print("Redemarrage pour appliquer le nouveau Wi-Fi...")
@@ -765,7 +825,7 @@ def gerer_client_web():
 
         elif methode == "GET" and chemin == "/networks":
             envoyer(conn, "200 OK", "application/json",
-                    json.dumps({"id": DEVICE_ID, "version": VERSION, "reseaux": reseaux_scannes}))
+                    json.dumps({"id": DEVICE_ID, "version": VERSION, "maison": CODE_MAISON, "reseaux": reseaux_scannes}))
 
         elif mode_ap and chemin != "/favicon.ico":
             envoyer(conn, "302 Found", "text/plain", "", "Location: http://{}/\r\n".format(AP_IP))

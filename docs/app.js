@@ -3,7 +3,32 @@
 'use strict';
 (() => {
   const BROKER = 'wss://broker.hivemq.com:8884/mqtt';
-  const RACINE = 'mon_projet_unique/esp';
+  // ------------------------------------------------------------------
+  // Maisons (code vide = la maison d'origine). Gardées dans ce navigateur.
+  // ------------------------------------------------------------------
+  const racineDe = (code) => (code ? `mon_projet_unique/m/${code}/esp` : 'mon_projet_unique/esp');
+  const codeValide = (c) => /^[a-z0-9-]{0,32}$/.test(c);
+  function lireMaisons() {
+    try {
+      const l = JSON.parse(localStorage.getItem('maisons') || 'null');
+      if (Array.isArray(l) && l.length) return l;
+    } catch (e) { /* stockage indisponible */ }
+    return [{ nom: 'Maison', code: '' }];
+  }
+  function ecrireMaisons(l) { try { localStorage.setItem('maisons', JSON.stringify(l)); } catch (e) { /* */ } }
+  function maisonActuelle() {
+    let code = '';
+    try { code = localStorage.getItem('maison') || ''; } catch (e) { /* */ }
+    const l = lireMaisons();
+    return l.find((m) => m.code === code) || l[0];
+  }
+  function nouveauCode() {
+    const c = 'abcdefghijkmnpqrstuvwxyz23456789';
+    const a = new Uint8Array(8);
+    crypto.getRandomValues(a);
+    return [...a].map((x) => c[x % c.length]).join('');
+  }
+  let RACINE = racineDe(maisonActuelle().code);
   const BROCHES = [2, 4, 13, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33];
   const RESERVES = new Set(['admin', 'wifi', 'config', 'meta', 'version', 'ota', 'availability']);
 
@@ -63,7 +88,9 @@
     const s = sorties(a).find((x) => x.id === sid);
     return s && s.type === 'chauffage' ? 'flamme' : 'lampe';
   }
-  const appareilsTries = () => [...etat.appareils.values()].sort((x, y) => nom(x).localeCompare(nom(y), 'fr'));
+  const appareilsTries = () => [...etat.appareils.values()]
+    .filter((a) => a.enLigne !== null || a.config)
+    .sort((x, y) => nom(x).localeCompare(nom(y), 'fr'));
   const reponse = (a, cmd, depuis) => (a.reponse && a.heureReponse >= depuis && a.reponse.cmd === cmd ? a.reponse : null);
 
   // ------------------------------------------------------------------
@@ -74,14 +101,15 @@
     clean: true, keepalive: 30, reconnectPeriod: 3000, connectTimeout: 10000
   });
 
+  const filtres = (r) => [
+    `${r}/+/availability`, `${r}/+/wifi/ip`, `${r}/+/wifi/reseaux`, `${r}/+/config`, `${r}/+/meta`,
+    `${r}/+/version`, `${r}/+/admin/reponse`, `${r}/+/+/status`, `${r}/+/+/valeur`,
+    `${r}/+/+/consigne`, `${r}/+/+/chauffe`
+  ];
+
   client.on('connect', () => {
     etat.connecte = true;
-    const r = RACINE;
-    client.subscribe([
-      `${r}/+/availability`, `${r}/+/wifi/ip`, `${r}/+/wifi/reseaux`, `${r}/+/config`, `${r}/+/meta`,
-      `${r}/+/version`, `${r}/+/admin/reponse`, `${r}/+/+/status`, `${r}/+/+/valeur`,
-      `${r}/+/+/consigne`, `${r}/+/+/chauffe`
-    ], { qos: 1 });
+    client.subscribe(filtres(RACINE), { qos: 1 });
     setTimeout(() => { etat.pret = true; rafraichir(); }, 2500);
     rafraichir();
   });
@@ -117,6 +145,30 @@
     }
     sujets.push('availability');
     sujets.forEach((s) => publier(t(id, s), '', true));
+    rafraichir();
+  }
+
+  function choisirMaison(code) {
+    try { localStorage.setItem('maison', code); } catch (e) { /* */ }
+    const nouvelle = racineDe(code);
+    if (nouvelle === RACINE) return;
+    if (client.connected) {
+      client.unsubscribe(filtres(RACINE));
+      client.subscribe(filtres(nouvelle), { qos: 1 });
+    }
+    RACINE = nouvelle;
+    etat.appareils.clear();
+    afficher();
+  }
+
+  // Déplace un appareil vers une autre maison (il efface lui-même ses traces ici)
+  function deplacer(id, code) {
+    const a = etat.appareils.get(id);
+    if (!a) return;
+    admin(id, { cmd: 'maison', code });
+    publier(`${racineDe(code)}/${id}/meta`, JSON.stringify({ ...(a.meta.nom ? { nom: a.meta.nom } : {}), icones: a.meta.icones || {} }), true);
+    publier(t(id, 'meta'), '', true);
+    etat.appareils.delete(id);
     rafraichir();
   }
 
@@ -204,7 +256,8 @@
     let date = new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
     date = date.charAt(0).toUpperCase() + date.slice(1);
 
-    let html = `<header><h1 class="salut">${salut}</h1><p class="date">${esc(date)}</p></header>`;
+    let html = `<header><h1 class="salut">${salut}</h1><p class="date">${esc(date)}</p>
+      ${lireMaisons().length > 1 ? `<button class="puce-maison" data-action="choisir-maison">${esc(maisonActuelle().nom)} ▾</button>` : ''}</header>`;
     if (!etat.connecte) html += `<p class="bandeau">Pas de connexion Internet pour le moment.<br>Ça revient tout seul, patiente un peu.</p>`;
 
     const tuiles = [];
@@ -344,7 +397,9 @@
         <li>Branche l'appareil. Sa petite lumière bleue reste allumée.<br>
           <span class="aide">Sinon, appuie 5 secondes sur son bouton « BOOT » et lâche quand ça clignote vite.</span></li>
         <li>Ouvre <b>Réglages → Wi-Fi</b> sur le téléphone et choisis le réseau <b>ESP32-Config-…</b></li>
-        <li>Une page s'ouvre toute seule : choisis le Wi-Fi de la maison, écris son mot de passe, touche <b>Enregistrer</b>.<br>
+        <li>Une page s'ouvre toute seule : choisis le Wi-Fi de la maison, écris son mot de passe,
+          ${maisonActuelle().code ? `dans « Code maison » écris <code>${esc(maisonActuelle().code)}</code>,` : 'laisse « Code maison » vide,'}
+          puis touche <b>Enregistrer</b>.<br>
           <span class="aide">Si rien ne s'ouvre, va sur <code>http://192.168.4.1</code> dans Safari.</span></li>
         <li>Reviens ici : l'appareil apparaît ci-dessous en 30 secondes environ.</li>
       </ol>
@@ -422,6 +477,7 @@
     return `${barre('Options avancées')}
       <button class="gros" data-action="lancer-ota">Mettre à jour les cartes${logiciel.version ? ` (logiciel v${esc(logiciel.version)})` : ''}</button>
       <div id="ota">${htmlOta()}</div>
+      <button class="gros clair" style="margin-top:12px" data-action="maisons">Maisons : ${esc(maisonActuelle().nom)}${lireMaisons().length > 1 ? ` (+${lireMaisons().length - 1})` : ''}</button>
       <button class="gros clair" style="margin-top:12px" data-action="aller" data-vue="carte">Préparer une carte neuve (USB)</button>
       <div id="liste-avance">${htmlListeAvance()}</div>`;
   }
@@ -510,6 +566,7 @@
         { texte: 'Configuration experte (JSON)', val: 'json' },
         { texte: 'Redémarrer', val: 'redemarrer' },
         { texte: 'Passer en mode réglage', val: 'mode' },
+        { texte: 'Déplacer vers une autre maison', val: 'deplacer' },
         { texte: 'Retirer de la liste', val: 'retirer', classe: 'danger' },
         { texte: 'Fermer', val: null }
       ]
@@ -518,11 +575,99 @@
     else if (val === 'dessin') changerDessin(id);
     else if (val === 'branche') aller('branche', id);
     else if (val === 'json') configJson(id);
+    else if (val === 'deplacer') menuDeplacer(id);
     else if (val === 'redemarrer' && await confirmer(`Redémarrer « ${nom(a)} » ?`)) admin(id, { cmd: 'redemarrer' });
     else if (val === 'mode' && await confirmer(`Passer « ${nom(a)} » en mode réglage ?`,
       'Il quitte le Wi-Fi et attend un téléphone à proximité. Sans réglage, il revient tout seul après 3 minutes.')) admin(id, { cmd: 'mode_config' });
     else if (val === 'retirer' && await confirmer(`Retirer « ${nom(a)} » ?`,
       a.enLigne === true ? "Il est encore allumé : il réapparaîtra tant qu'il reste branché." : null)) oublier(id);
+  }
+
+  async function menuDeplacer(id) {
+    const a = etat.appareils.get(id);
+    const autres = lireMaisons().filter((m) => m.code !== maisonActuelle().code);
+    if (!autres.length) { toast("Ajoute d'abord une autre maison (bouton « Maisons »)"); return; }
+    if (a.enLigne !== true) { toast("L'appareil doit être en ligne"); return; }
+    const { val } = await modale({
+      titre: `Déplacer « ${nom(a)} » vers…`,
+      boutons: autres.map((m) => ({ texte: m.nom, val: m.code || '__origine__' })).concat([{ texte: 'Annuler', val: null }])
+    });
+    if (val === null) return;
+    const code = val === '__origine__' ? '' : val;
+    if (await confirmer('Déplacer cet appareil ?', "Il disparaîtra d'ici et apparaîtra dans l'autre maison après son redémarrage.")) {
+      deplacer(id, code);
+      toast('Déplacé');
+    }
+  }
+
+  async function demanderTexte(titre, valeur = '') {
+    const { val, data } = await modale({
+      titre, html: `<input name="v" value="${esc(valeur)}" autocapitalize="off" autocomplete="off">`,
+      boutons: [{ texte: 'OK', val: 'ok', classe: 'principal' }, { texte: 'Annuler', val: null }]
+    });
+    return val === 'ok' && data.v.trim() ? data.v.trim() : null;
+  }
+
+  async function gererMaisons() {
+    const l = lireMaisons();
+    const actuelle = maisonActuelle().code;
+    const { val } = await modale({
+      titre: 'Maisons suivies ici',
+      boutons: l.map((m, i) => ({ texte: `${m.code === actuelle ? '● ' : '○ '}${m.nom}`, val: `m${i}` }))
+        .concat([{ texte: '+ Ajouter une maison', val: 'ajouter' }, { texte: 'Fermer', val: null }])
+    });
+    if (!val) return;
+    if (val === 'ajouter') return ajouterMaison();
+    const m = l[Number(val.slice(1))];
+    const r = await modale({
+      titre: m.nom,
+      html: `<p>Code : <code>${esc(m.code || "(maison d'origine, sans code)")}</code></p>`,
+      boutons: [{ texte: 'Afficher cette maison', val: 'voir', classe: 'principal' }, { texte: 'Renommer', val: 'nom' },
+        { texte: 'Copier le code', val: 'copier' }, { texte: 'Ne plus suivre', val: 'retirer', classe: 'danger' }, { texte: 'Fermer', val: null }]
+    });
+    if (r.val === 'voir') choisirMaison(m.code);
+    else if (r.val === 'nom') {
+      const n = await demanderTexte('Nom de la maison', m.nom);
+      if (n) { ecrireMaisons(l.map((x) => (x.code === m.code ? { ...x, nom: n } : x))); afficher(); }
+    } else if (r.val === 'copier') {
+      try { await navigator.clipboard.writeText(m.code); toast('Code copié'); } catch (e) { toast(`Code : ${m.code || '(vide)'}`); }
+    } else if (r.val === 'retirer') {
+      if (l.length <= 1) { toast('Il faut garder au moins une maison'); return; }
+      ecrireMaisons(l.filter((x) => x.code !== m.code));
+      if (m.code === actuelle) choisirMaison(lireMaisons()[0].code); else afficher();
+    }
+  }
+
+  async function ajouterMaison() {
+    const { val } = await modale({
+      titre: 'Ajouter une maison',
+      boutons: [{ texte: 'Créer une nouvelle maison', val: 'creer', classe: 'principal' },
+        { texte: 'Rejoindre avec un code', val: 'code' }, { texte: "Rejoindre la maison d'origine", val: 'origine' }, { texte: 'Annuler', val: null }]
+    });
+    let code = null;
+    if (val === 'creer') code = nouveauCode();
+    else if (val === 'origine') code = '';
+    else if (val === 'code') {
+      const c = await demanderTexte('Code de la maison');
+      if (!c) return;
+      if (!codeValide(c.toLowerCase())) { toast('Code invalide'); return; }
+      code = c.toLowerCase();
+    }
+    if (code === null) return;
+    const nomMaison = await demanderTexte('Nom à afficher', val === 'creer' ? 'Chez moi' : val === 'origine' ? 'Chez papa' : 'Maison');
+    if (!nomMaison) return;
+    ecrireMaisons(lireMaisons().filter((m) => m.code !== code).concat([{ nom: nomMaison, code }]));
+    choisirMaison(code);
+    if (val === 'creer') toast('Maison créée : les cartes ajoutées maintenant iront dedans');
+  }
+
+  async function choisirMaisonAccueil() {
+    const l = lireMaisons();
+    const { val } = await modale({
+      titre: 'Quelle maison ?',
+      boutons: l.map((m, i) => ({ texte: m.nom, val: `m${i}` })).concat([{ texte: 'Annuler', val: null }])
+    });
+    if (val) choisirMaison(l[Number(val.slice(1))].code);
   }
 
   async function renommer(id) {
@@ -965,6 +1110,8 @@
       case 'renommer': renommer(id); break;
       case 'menu': menuAppareil(id); break;
       case 'lancer-ota': preparerOta(); break;
+      case 'maisons': gererMaisons(); break;
+      case 'choisir-maison': choisirMaisonAccueil(); break;
       case 'connecter-carte': connecterCarte(); break;
       case 'installer-tout': preparerCarte(true); break;
       case 'installer-logiciel': preparerCarte(false); break;
