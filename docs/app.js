@@ -29,6 +29,10 @@
     return [...a].map((x) => c[x % c.length]).join('');
   }
   let RACINE = racineDe(maisonActuelle().code);
+  // Première visite : il faut choisir sa maison (si le navigateur peut s'en souvenir)
+  function accueilRequis() {
+    try { return localStorage.getItem('maisons') === null; } catch (e) { return false; }
+  }
   const BROCHES = [2, 4, 13, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33];
   const RESERVES = new Set(['admin', 'wifi', 'config', 'meta', 'version', 'ota', 'availability']);
 
@@ -223,6 +227,7 @@
   function afficher() {
     const { vue, param } = vueCourante();
     const app = $('#app');
+    if (accueilRequis()) { app.innerHTML = vueBienvenue(); return; }
     const vues = { accueil: vueAccueil, reglages: vueReglages, ajouter: vueAjouter, wifi: vueWifi, avance: vueAvance, branche: () => vueBranche(param), carte: vueCarte };
     app.innerHTML = (vues[vue] || vueAccueil)();
   }
@@ -235,6 +240,7 @@
     requestAnimationFrame(() => {
       rafraichissementPrevu = false;
       const { vue } = vueCourante();
+      if (accueilRequis()) return;
       if (vue === 'accueil' || !['reglages', 'ajouter', 'wifi', 'avance', 'branche', 'carte'].includes(vue)) afficher();
       else if (vue === 'ajouter') remplir('#nouveaux', htmlNouveaux());
       else if (vue === 'wifi') remplir('#resultats', htmlResultatsWifi());
@@ -659,6 +665,38 @@
     ecrireMaisons(lireMaisons().filter((m) => m.code !== code).concat([{ nom: nomMaison, code }]));
     choisirMaison(code);
     if (val === 'creer') toast('Maison créée : les cartes ajoutées maintenant iront dedans');
+  }
+
+  function vueBienvenue() {
+    return `<header><h1 class="salut" style="margin-top:28px">Bienvenue</h1></header>
+      <p class="texte" style="margin-top:12px">Pour commencer, crée ta maison : tes appareils n'apparaîtront que chez toi
+        et chez les personnes à qui tu donneras son code.</p>
+      <div class="pile" style="margin-top:20px">
+        <button class="gros" data-action="bienvenue-creer">Je crée ma maison</button>
+        <button class="gros clair" data-action="bienvenue-rejoindre">Je rejoins une maison avec un code</button>
+      </div>
+      <button class="lien-bas" data-action="bienvenue-origine">Maison d'origine (installation existante)</button>`;
+  }
+
+  async function premiereMaison(m) {
+    ecrireMaisons([m]);
+    choisirMaison(m.code);
+    afficher();
+  }
+
+  async function bienvenue(choix) {
+    if (choix === 'creer') {
+      const n = await demanderTexte('Nom de ta maison', 'Ma maison');
+      if (n) premiereMaison({ nom: n, code: nouveauCode() });
+    } else if (choix === 'rejoindre') {
+      const c = await demanderTexte('Code de la maison');
+      if (!c) return;
+      if (!codeValide(c.toLowerCase())) { toast('Code invalide'); return; }
+      const n = await demanderTexte('Nom à afficher', 'Maison');
+      if (n) premiereMaison({ nom: n, code: c.toLowerCase() });
+    } else if (await confirmer("Maison d'origine", "C'est la maison des premières cartes installées, sans code. Choisis-la seulement si c'est la tienne.")) {
+      premiereMaison({ nom: 'Maison', code: '' });
+    }
   }
 
   async function choisirMaisonAccueil() {
@@ -1111,6 +1149,9 @@
       case 'menu': menuAppareil(id); break;
       case 'lancer-ota': preparerOta(); break;
       case 'maisons': gererMaisons(); break;
+      case 'bienvenue-creer': bienvenue('creer'); break;
+      case 'bienvenue-rejoindre': bienvenue('rejoindre'); break;
+      case 'bienvenue-origine': bienvenue('origine'); break;
       case 'choisir-maison': choisirMaisonAccueil(); break;
       case 'connecter-carte': connecterCarte(); break;
       case 'installer-tout': preparerCarte(true); break;
