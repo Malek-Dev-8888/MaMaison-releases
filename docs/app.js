@@ -2,7 +2,11 @@
  * Même broker, mêmes topics que l'appli Android : on voit la même maison des deux côtés. */
 'use strict';
 (() => {
-  const BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+  // Broker privé (EMQX) : mot de passe intégré à la publication (Secret GitHub), rien à taper.
+  // Sans lui (essai en local), ancien broker public.
+  const PASS_B64 = 'U3dlZW5leXRvZGQxIQ==';
+  const PASS_BROKER = PASS_B64.startsWith('__') ? '' : new TextDecoder().decode(Uint8Array.from(atob(PASS_B64), (c) => c.charCodeAt(0)));
+  const BROKER = PASS_BROKER ? 'wss://rb01201d.ala.eu-central-1.emqxsl.com:8084/mqtt' : 'wss://broker.hivemq.com:8884/mqtt';
   // ------------------------------------------------------------------
   // Maisons (code vide = la maison d'origine). Gardées dans ce navigateur.
   // ------------------------------------------------------------------
@@ -102,7 +106,8 @@
   // ------------------------------------------------------------------
   const client = mqtt.connect(BROKER, {
     clientId: 'web_' + Math.random().toString(16).slice(2, 10),
-    clean: true, keepalive: 30, reconnectPeriod: 3000, connectTimeout: 10000
+    clean: true, keepalive: 30, reconnectPeriod: 3000, connectTimeout: 10000,
+    ...(PASS_BROKER ? { username: 'NAIT-BROKER', password: PASS_BROKER } : {})
   });
 
   const filtres = (r) => [
@@ -1007,6 +1012,10 @@
         await repl.ecrireFichier(nomFichier, octets, (n) => noter('', (fait + n) / total));
         fait += octets.length;
         noter(`${nomFichier} copié ✔`, fait / total);
+      }
+      if (PASS_BROKER) {
+        await repl.ecrireFichier('broker.json', new TextEncoder().encode(JSON.stringify({ pass: PASS_BROKER })), () => {});
+        noter('Accès au broker privé enregistré ✔');
       }
       // Repart de zéro : le Wi-Fi et les réglages ne sont effacés que par « tout installer »
       await repl.executer('import os\nfor f in ("ota_essais","ota_rollback","main.bak","force_ap"):\n    try:\n        os.remove(f)\n    except OSError:\n        pass');

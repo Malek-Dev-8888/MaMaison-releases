@@ -4,7 +4,7 @@
 #  l'autre (sorties, capteurs) se règle dans appareil.json, modifiable
 #  depuis l'appli (Options avancées > Configuration).
 # =====================================================================
-VERSION = "2.2"
+VERSION = "2.3"
 
 import time
 import os
@@ -18,8 +18,30 @@ from machine import Pin, reset, unique_id
 from umqtt.simple import MQTTClient
 
 # --- MQTT ---
-MQTT_BROKER = "broker.hivemq.com"
-MQTT_PORT = 1883
+# Broker privé (identifiant + mot de passe, connexion chiffrée). Le mot de passe n'est jamais
+# écrit dans ce fichier : il arrive par le réseau local (réglage Wi-Fi ou bascule depuis l'appli)
+# et reste dans broker.json sur la carte. Sans mot de passe : ancien broker public.
+FICHIER_BROKER = "broker.json"
+FICHIER_BROKER_PREC = "broker_prec.json"
+BROKER_PRIVE = {"hote": "rb01201d.ala.eu-central-1.emqxsl.com", "port": 8883, "tls": True, "user": "NAIT-BROKER"}
+BROKER_PUBLIC = {"hote": "broker.hivemq.com", "port": 1883, "tls": False, "user": "", "pass": ""}
+DELAI_ESSAI_BROKER_MS = 180000   # nouveau broker injoignable 3 min -> retour à l'ancien
+
+
+def _lire_broker():
+    try:
+        with open(FICHIER_BROKER) as f:
+            d = json.load(f)
+    except Exception:
+        return dict(BROKER_PUBLIC)
+    if not d.get("pass"):
+        return dict(BROKER_PUBLIC)
+    b = dict(BROKER_PRIVE)
+    b.update(d)
+    return b
+
+
+BROKER = _lire_broker()
 
 DEVICE_ID = ubinascii.hexlify(unique_id()).decode()[-6:]
 CLIENT_ID = ("esp32_" + DEVICE_ID).encode()
@@ -399,6 +421,48 @@ def repondre(cmd, ok, message=""):
     publier(T_REPONSE, json.dumps({"cmd": cmd, "ok": ok, "message": message}))
 
 
+def changer_broker(mot_de_passe, hote=None, port=None, user=None):
+    """Passe au broker privé. L'ancien réglage est gardé : retour automatique si ça échoue."""
+    try:
+        with open(FICHIER_BROKER) as f:
+            ancien = f.read()
+        with open(FICHIER_BROKER_PREC, "w") as f:
+            f.write(ancien)
+    except OSError:
+        supprimer(FICHIER_BROKER_PREC)   # pas d'ancien réglage : retour au broker public
+    d = {"pass": mot_de_passe, "essai": True}
+    if hote:
+        d["hote"] = hote
+    if port:
+        d["port"] = int(port)
+    if user:
+        d["user"] = user
+    ecrire_json(FICHIER_BROKER, d)
+
+
+def broker_valide():
+    """Connexion réussie : le nouveau broker est adopté pour de bon."""
+    if BROKER.get("essai"):
+        d = lire_json(FICHIER_BROKER, {})
+        d.pop("essai", None)
+        ecrire_json(FICHIER_BROKER, d)
+        BROKER.pop("essai", None)
+        supprimer(FICHIER_BROKER_PREC)
+
+
+def revenir_broker_precedent():
+    print("Nouveau broker injoignable : retour a l'ancien reglage.")
+    try:
+        with open(FICHIER_BROKER_PREC) as f:
+            ancien = f.read()
+        with open(FICHIER_BROKER, "w") as f:
+            f.write(ancien)
+    except OSError:
+        supprimer(FICHIER_BROKER)
+    supprimer(FICHIER_BROKER_PREC)
+    reset()
+
+
 def quitter_maison():
     """Efface les messages retenus de la maison actuelle (l'appareil n'y apparaîtra plus)."""
     sujets = [T_IP, T_RESEAUX, T_CONFIG, T_VERSION]
@@ -500,6 +564,17 @@ def traiter_admin(msg):
         repondre(cmd, True, "Redémarrage")
         redemarrer()
 
+    elif cmd == "broker":
+        if not BROKER.get("pass"):
+            repondre(cmd, False, "Refusé : à faire par le réseau local")
+            return
+        if not d.get("pass"):
+            repondre(cmd, False, "Mot de passe manquant")
+            return
+        changer_broker(d["pass"], d.get("hote"), d.get("port"), d.get("user"))
+        repondre(cmd, True, "Broker enregistré, redémarrage")
+        redemarrer()
+
     elif cmd == "maison":
         code = str(d.get("code", "")).strip().lower()
         if not code_valide(code):
@@ -565,8 +640,18 @@ def appliquer_ota(msg):
         repondre("ota", False, "Échec : {}".format(e))
 
 
+def _contexte_tls():
+    import ssl
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.verify_mode = ssl.CERT_NONE   # chiffré ; certificat non vérifié (pas de magasin de CA sur la carte)
+    return ctx
+
+
 def connecter_mqtt():
-    c = MQTTClient(CLIENT_ID, MQTT_BROKER, port=MQTT_PORT, keepalive=60)
+    gc.collect()   # la connexion chiffrée demande de la mémoire
+    c = MQTTClient(CLIENT_ID, BROKER["hote"], port=int(BROKER["port"]),
+                   user=BROKER.get("user") or None, password=BROKER.get("pass") or None,
+                   keepalive=60, ssl=_contexte_tls() if BROKER.get("tls") else None)
     c.set_callback(on_message)
     c.set_last_will(T_DISPO, b"offline", retain=True)
     c.connect()
@@ -586,6 +671,8 @@ def annoncer():
     client.subscribe(T_ADMIN)
     client.subscribe(T_OTA)
     lire_capteurs(force=True)
+
+    broker_valide()
 
     # Suite d'une mise à jour
     if existe(FICHIER_ESSAIS):
@@ -773,10 +860,10 @@ def page_html():
 <script>
  function envoyer(e){
   e.preventDefault();
-  var s=document.getElementById('s').value, p=document.getElementById('p').value, m=document.getElementById('m').value;
+  var s=document.getElementById('s').value, p=document.getElementById('p').value, m=document.getElementById('m').value, k=document.getElementById('k').value;
   document.getElementById('b').innerText='Envoi…';
   fetch('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-   body:'ssid='+encodeURIComponent(s)+'&password='+encodeURIComponent(p)+'&maison='+encodeURIComponent(m)})
+   body:'ssid='+encodeURIComponent(s)+'&password='+encodeURIComponent(p)+'&maison='+encodeURIComponent(m)+'&bpass='+encodeURIComponent(k)})
   .finally(function(){
    var c=document.getElementById('c'); c.innerHTML='<h2>C\\'est enregistré</h2><p>L\\'appareil redémarre. Tu peux fermer cette page.</p>';
    setTimeout(function(){window.close();},1500);
@@ -791,6 +878,8 @@ def page_html():
 <label>Mot de passe</label><input id='p' type='password'>
 <label>Code maison <small>(laisser tel quel si tu ne sais pas)</small></label>
 <input id='m' value='""" + echapper(CODE_MAISON) + """' autocapitalize='off' autocomplete='off'>
+<label>Mot de passe du broker <small>(laisser vide pour ne pas changer)</small></label>
+<input id='k' type='password' autocomplete='off'>
 <button id='b'>Enregistrer</button>
 </form></div></body></html>"""
 
@@ -813,6 +902,8 @@ def gerer_client_web():
                     code = champs["maison"].strip().lower()
                     if code_valide(code) and code != CODE_MAISON:
                         ecrire_json(FICHIER_MAISON, {"code": code})
+                if champs.get("bpass"):
+                    changer_broker(champs["bpass"])
                 envoyer(conn, "200 OK", "text/plain", "OK")
                 conn.close()
                 print("Redemarrage pour appliquer le nouveau Wi-Fi...")
@@ -820,12 +911,24 @@ def gerer_client_web():
             else:
                 envoyer(conn, "400 Bad Request", "text/plain", "SSID manquant")
 
+        elif methode == "POST" and chemin == "/broker":
+            # Bascule vers le broker privé, depuis le réseau local uniquement
+            champs = parser_formulaire(corps)
+            if champs.get("bpass"):
+                changer_broker(champs["bpass"], champs.get("hote"), champs.get("port"), champs.get("user"))
+                envoyer(conn, "200 OK", "text/plain", "OK")
+                conn.close()
+                redemarrer()
+            else:
+                envoyer(conn, "400 Bad Request", "text/plain", "Mot de passe manquant")
+
         elif methode == "GET" and chemin == "/":
             envoyer(conn, "200 OK", "text/html; charset=utf-8", page_html())
 
         elif methode == "GET" and chemin == "/networks":
             envoyer(conn, "200 OK", "application/json",
-                    json.dumps({"id": DEVICE_ID, "version": VERSION, "maison": CODE_MAISON, "reseaux": reseaux_scannes}))
+                    json.dumps({"id": DEVICE_ID, "version": VERSION, "maison": CODE_MAISON,
+                               "broker": "prive" if BROKER.get("pass") else "public", "reseaux": reseaux_scannes}))
 
         elif mode_ap and chemin != "/favicon.ico":
             envoyer(conn, "302 Found", "text/plain", "", "Location: http://{}/\r\n".format(AP_IP))
@@ -888,7 +991,10 @@ def attendre_en_servant(secondes):
 def connecter_mqtt_avec_backoff():
     global client
     delai = 2
+    debut = time.ticks_ms()
     while wlan.isconnected():
+        if BROKER.get("essai") and time.ticks_diff(time.ticks_ms(), debut) > DELAI_ESSAI_BROKER_MS:
+            revenir_broker_precedent()
         try:
             client = connecter_mqtt()
             annoncer()
