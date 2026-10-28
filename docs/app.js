@@ -513,55 +513,69 @@
     }).join('<br>')}</p>`;
   }
 
-  // Le main.py publié avec la web app (copié depuis esp32/ à chaque push)
-  const logiciel = { octets: null, code: null, version: null };
+  // Le logiciel des cartes publié avec la web app (dossier esp32/, à chaque push) :
+  // maison.mpy = programme précompilé (cartes 2.6 et plus), maison.py = le même en code source
+  // (cartes plus anciennes : elles le reçoivent d'abord, annoncent « 2.6s », puis reçoivent le précompilé).
+  const logiciel = { source: null, precompile: null, version: null };
   async function chargerLogiciel() {
-    if (logiciel.octets) return logiciel;
-    const rep = await fetch(`main.py?v=${Date.now()}`, { cache: 'no-store' });
-    if (!rep.ok) throw new Error('logiciel introuvable');
-    logiciel.octets = new Uint8Array(await rep.arrayBuffer());
-    logiciel.code = new TextDecoder('utf-8', { ignoreBOM: true }).decode(logiciel.octets);
-    const m = logiciel.code.match(/^VERSION\s*=\s*"([^"]+)"/m);
+    if (logiciel.precompile) return logiciel;
+    const [a, b] = await Promise.all(['maison.py', 'maison.mpy'].map((f) => fetch(`${f}?v=${Date.now()}`, { cache: 'no-store' })));
+    if (!a.ok || !b.ok) throw new Error('logiciel introuvable');
+    logiciel.source = new Uint8Array(await a.arrayBuffer());
+    logiciel.precompile = new Uint8Array(await b.arrayBuffer());
+    const m = new TextDecoder().decode(logiciel.source).match(/^VERSION\s*=\s*"([^"]+)"/m);
     logiciel.version = m ? m[1] : null;
     return logiciel;
   }
   chargerLogiciel().then(() => { if (vueCourante().vue === 'avance') afficher(); }).catch(() => {});
 
+  // « 2.6s » -> [2, 6] : le suffixe est ignoré
   function plusAncienne(a, b) {
     if (!a) return true;
-    const x = a.split('.').map(Number), y = b.split('.').map(Number);
+    const chiffres = (v) => v.split('.').map((p) => parseInt(p, 10) || 0);
+    const x = chiffres(a), y = chiffres(b);
     for (let k = 0; k < Math.max(x.length, y.length); k++) {
       const d = (x[k] || 0) - (y[k] || 0);
       if (d) return d < 0;
     }
     return false;
   }
+  const aMettreAJour = (v, l) => plusAncienne(v, l || '0') || /s$/.test(v || '');
+
+  async function paquetOta(versionCarte, l) {
+    const ota2 = versionCarte && !plusAncienne(versionCarte, '2.6');
+    const contenu = ota2 ? l.precompile : l.source;
+    const empreinte = [...new Uint8Array(await crypto.subtle.digest('SHA-256', contenu))]
+      .map((b) => b.toString(16).padStart(2, '0')).join('');
+    const entete = new TextEncoder().encode(`${ota2 ? 'OTA2' : 'OTA1'}\n${empreinte}\n`);
+    const p = new Uint8Array(entete.length + contenu.length);
+    p.set(entete);
+    p.set(contenu, entete.length);
+    return p;
+  }
 
   async function preparerOta() {
     let l;
     try { l = await chargerLogiciel(); } catch (e) { toast("Logiciel introuvable sur le site"); return; }
-    const octets = l.octets, code = l.code;
     const enLigne = appareilsTries().filter((a) => a.enLigne === true);
     if (!enLigne.length) { toast('Aucun appareil en ligne'); return; }
 
     const { val, data } = await modale({
       titre: `Installer la version ${l.version || '?'}`,
-      html: enLigne.map((a) => `<label class="case"><input type="checkbox" name="c_${esc(a.id)}" ${plusAncienne(a.version, l.version || '0') ? 'checked' : ''}> ${esc(nom(a))} (v${esc(a.version || '?')})</label>`).join('')
-        + '<p class="aide">Cochées d\'office : les cartes qui ont une version plus ancienne.</p>',
+      html: enLigne.map((a) => `<label class="case"><input type="checkbox" name="c_${esc(a.id)}" ${aMettreAJour(a.version, l.version) ? 'checked' : ''}> ${esc(nom(a))} (v${esc(a.version || '?')})</label>`).join('')
+        + '<p class="aide">Cochées d\'office : les cartes qui ont une version plus ancienne (ou « s » : pas encore précompilée).</p>',
       boutons: [{ texte: 'Envoyer', val: 'ok', classe: 'principal' }, { texte: 'Annuler', val: null }]
     });
     if (val !== 'ok') return;
 
-    const empreinte = [...new Uint8Array(await crypto.subtle.digest('SHA-256', octets))]
-      .map((b) => b.toString(16).padStart(2, '0')).join('');
     ota.heure = maintenant();
     ota.cibles = [];
-    enLigne.forEach((a) => {
+    for (const a of enLigne) {
       if (data[`c_${a.id}`]) {
         ota.cibles.push(a.id);
-        publier(t(a.id, 'ota'), `OTA1\n${empreinte}\n${code}`);
+        publier(t(a.id, 'ota'), await paquetOta(a.version, l));
       }
-    });
+    }
     rafraichir();
   }
 
@@ -1001,7 +1015,8 @@
 
   async function installerLogiciel() {
     noter('Copie du logiciel Ma Maison…', 0);
-    const fichiers = [['boot.py', await fichierDuSite('boot.py')], ['main.py', await fichierDuSite('main.py')]];
+    const fichiers = [];
+    for (const f of ['boot.py', 'main.py', 'maison.mpy']) fichiers.push([f, await fichierDuSite(f)]);
     const repl = new Repl(carte.port);
     await repl.ouvrir();
     try {
@@ -1018,7 +1033,7 @@
         noter('Accès au broker privé enregistré ✔');
       }
       // Repart de zéro : le Wi-Fi et les réglages ne sont effacés que par « tout installer »
-      await repl.executer('import os\nfor f in ("ota_essais","ota_rollback","main.bak","force_ap"):\n    try:\n        os.remove(f)\n    except OSError:\n        pass');
+      await repl.executer('import os\nfor f in ("ota_essais","ota_rollback","main.bak","maison.bak","maison.tmp","force_ap"):\n    try:\n        os.remove(f)\n    except OSError:\n        pass');
       await repl.redemarrer();
     } finally {
       await repl.fermer();
