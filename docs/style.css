@@ -201,6 +201,54 @@ code { background: var(--pierre); border-radius: 6px; padding: 1px 6px; font-siz
 .supprimer { border: 0; background: none; color: var(--rouge); font-size: 15px; padding: 10px 0 0; float: right; }
 .element::after { content: ""; display: block; clear: both; }
 
+/* ---------- Une partie par carte ESP32 sur l'écran principal ---------- */
+.entete-carte {
+  width: 100%; margin-top: 28px; border: 2px solid var(--pierre); background: var(--creme);
+  border-radius: 18px; padding: 10px 12px 10px 16px; min-height: 72px; text-align: left;
+  display: flex; align-items: center; gap: 12px;
+}
+.entete-carte:active { background: var(--pierre); }
+.entete-carte .puce { width: 34px; height: 34px; flex: none; fill: var(--encre); }
+.entete-carte b { font-family: var(--serif); font-size: 23px; overflow-wrap: break-word; }
+.entete-carte small { font-size: 17px; }
+.entete-carte .vers-plan { flex: none; color: var(--terre); font-weight: 700; font-size: 19px; }
+.alerte { color: var(--terre); }
+.rien { font-size: 18px; color: var(--encre-douce); margin: 12px 8px 0; }
+.broche-txt { font-size: 16px; color: var(--encre-douce); margin-top: 2px; }
+
+/* ---------- Dessin de la carte ---------- */
+.plan-carte { display: block; width: 100%; height: auto; margin-top: 12px; font-family: var(--sans); }
+.plan-carte .broche { cursor: pointer; outline: none; }
+.plan-carte .broche:focus-visible rect:nth-of-type(2) { stroke: var(--encre); stroke-width: 2; }
+.plan-carte .choisissable:hover rect:nth-of-type(2) { filter: brightness(.93); }
+.legende { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 10px 0 0; font-size: 16px; }
+.pastille { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pastille i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
+.titre-section { font-family: var(--serif); font-size: 24px; margin: 28px 0 0; }
+.branche {
+  background: var(--creme); border: 1px solid var(--pierre); border-radius: 18px;
+  padding: 14px 16px; margin-top: 12px;
+}
+.branche.thermo { background: var(--ciel); }
+.branche.chauffage { background: var(--braise-pale); }
+.branche b { font-size: 20px; }
+.branche p { margin: 6px 0 0; font-size: 17px; white-space: pre-line; }
+
+/* Éditeur en trois parties */
+.partie { margin-top: 36px; }
+.partie.premiere { margin-top: 4px; }
+.partie h2 { font-family: var(--serif); font-size: 24px; margin: 0; display: flex; align-items: center; gap: 10px; }
+.rond-petit { width: 40px; height: 40px; border-radius: 50%; background: var(--creme); display: grid; place-items: center; flex: none; }
+.rond-petit svg { width: 26px; height: 26px; fill: var(--encre); }
+.partie .ajouter { margin-top: 12px; min-height: 60px; font-size: 18px; }
+.choix-broche {
+  width: 100%; margin-top: 12px; min-height: 56px; border-radius: 16px;
+  border: 2px solid var(--pierre); background: #fff; font-size: 18px; text-align: left;
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+}
+.choix-broche svg { width: 24px; height: 24px; fill: var(--terre); flex: none; }
+.branchement { white-space: pre-line; }
+
 /* ---------- Fenêtres ---------- */
 .fond-modale {
   position: fixed; inset: 0; background: rgba(42, 37, 32, .45);

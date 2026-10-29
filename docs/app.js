@@ -37,7 +37,112 @@
   function accueilRequis() {
     try { return localStorage.getItem('maisons') === null; } catch (e) { return false; }
   }
-  const BROCHES = [2, 4, 13, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33];
+  // ------------------------------------------------------------------
+  // Brochage de la carte ESP32 DevKit 30 broches, vue de dessus (antenne en haut, USB en bas).
+  // [nom sérigraphié, numéro GPIO, genre, explication] — même contenu que Brochage.kt (Android).
+  // ------------------------------------------------------------------
+  const ENTREE = 'Entrée seulement : elle ne peut pas commander un relais, ni lire un thermomètre DHT.';
+  const DEMARRAGE = 'Broche de démarrage : un relais branché ici claquerait à chaque redémarrage, ou empêcherait la carte de démarrer.';
+  const LIBRE = 'Libre : relais, LED ou thermomètre.';
+  const MASSE = 'Masse (0 V) : le « − » ou « GND » des modules.';
+  const USB = 'Réservée au câble USB (console, installation du logiciel).';
+  const BROCHAGE = {
+    gauche: [
+      ['EN', null, 'reset', 'Bouton EN : redémarre la carte. Ne rien brancher.'],
+      ['VP', 36, 'eviter', ENTREE], ['VN', 39, 'eviter', ENTREE], ['D34', 34, 'eviter', ENTREE], ['D35', 35, 'eviter', ENTREE],
+      ['D32', 32, 'libre', LIBRE], ['D33', 33, 'libre', LIBRE], ['D25', 25, 'libre', LIBRE], ['D26', 26, 'libre', LIBRE],
+      ['D27', 27, 'libre', LIBRE], ['D14', 14, 'eviter', DEMARRAGE], ['D12', 12, 'eviter', DEMARRAGE], ['D13', 13, 'libre', LIBRE],
+      ['GND', null, 'masse', MASSE], ['VIN', null, 'alim', '5 V venant du câble USB : alimente les modules relais (VCC).']
+    ],
+    droite: [
+      ['D23', 23, 'libre', LIBRE], ['D22', 22, 'libre', LIBRE], ['TX0', 1, 'eviter', USB], ['RX0', 3, 'eviter', USB],
+      ['D21', 21, 'libre', LIBRE], ['D19', 19, 'libre', LIBRE], ['D18', 18, 'libre', LIBRE], ['D5', 5, 'eviter', DEMARRAGE],
+      ['TX2', 17, 'libre', LIBRE], ['RX2', 16, 'libre', LIBRE], ['D4', 4, 'libre', LIBRE],
+      ['D2', 2, 'libre', "Libre. C'est aussi la petite LED bleue de la carte : elle s'allumera avec ce qui est branché ici."],
+      ['D15', 15, 'eviter', DEMARRAGE],
+      ['GND', null, 'masse', MASSE], ['3V3', null, 'alim', '3,3 V : alimente les thermomètres DHT (le « + »).']
+    ]
+  };
+  const TOUTES_BROCHES = [...BROCHAGE.gauche, ...BROCHAGE.droite];
+  const brocheParGpio = (g) => TOUTES_BROCHES.find((b) => b[1] === g);
+  const nomBroche = (g) => (brocheParGpio(g) || [`GPIO ${g}`])[0];
+
+  /** Comment brancher un élément ; genre = inter | chauffage | thermo. */
+  function branchement(genre, g) {
+    const b = g == null ? 'la broche choisie' : nomBroche(g);
+    if (g === 2 && genre !== 'thermo') return "Rien à brancher : c'est la petite LED bleue de la carte.";
+    if (genre === 'thermo') return `Thermomètre : + → 3V3 · − → GND · DATA → ${b}\n(capteur seul à 4 pattes : ajouter une résistance de 10 kΩ entre DATA et 3V3)`;
+    if (genre === 'chauffage') return `Module relais : VCC → VIN · GND → GND · IN → ${b}\nChaudière : COM + NO du relais sur le bornier « thermostat d'ambiance », jamais sur le 230 V.`;
+    return `Module relais : VCC → VIN · GND → GND · IN → ${b}`;
+  }
+  const genreSortie = (s) => (s.type === 'thermostat' || s.type === 'chauffage' ? 'chauffage' : 'inter');
+
+  /**
+   * Dessin SVG de la carte. occupees : Map gpio -> { nom, genre }.
+   * Mode choix : les broches libres portent data-val (le numéro), les autres data-info (explication).
+   * Mode plan : chaque broche porte data-action="info-broche".
+   */
+  function svgCarte({ occupees = new Map(), selection = null, choix = false, id = '' }) {
+    const L = 360, X = 128, LC = 104, RH = 31, HAUT = 74, N = 15;
+    const H = HAUT + N * RH + 66;
+    const court = (t, n) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+    let o = `<svg class="plan-carte" viewBox="0 0 ${L} ${H}" role="img" aria-label="Plan de la carte">`;
+    // Carte, antenne, module
+    o += `<rect x="${X}" y="3" width="${LC}" height="${H - 8}" rx="12" fill="#1F2733" stroke="#3A4556" stroke-width="2"/>`;
+    o += `<rect x="${X + 12}" y="12" width="${LC - 24}" height="${HAUT - 34}" rx="5" fill="#7A3E12"/>`;
+    let zig = `M${X + 18},${HAUT - 28}`;
+    for (let k = 0, x = X + 18, p = (LC - 36) / 8; k < 4; k++) { zig += ` V18 H${x + p} V${HAUT - 28} H${x + 2 * p}`; x += 2 * p; }
+    o += `<path d="${zig}" fill="none" stroke="#F2B53A" stroke-width="2.5"/>`;
+    o += `<rect x="${X + 22}" y="${HAUT - 16}" width="${LC - 44}" height="${5 * RH + 10}" rx="5" fill="#4A5568"/>`;
+    // Boutons EN / BOOT, prise USB
+    const yb = HAUT + N * RH + 6;
+    [['EN', X + 22], ['BOOT', X + LC - 22]].forEach(([t, cx]) => {
+      o += `<rect x="${cx - 17}" y="${yb}" width="34" height="22" rx="4" fill="#2D3748"/><text x="${cx}" y="${yb + 15}" fill="#E8ECF2" font-size="9.5" text-anchor="middle">${t}</text>`;
+    });
+    o += `<rect x="${X + LC / 2 - 22}" y="${yb + 30}" width="44" height="24" rx="4" fill="#64748B"/><text x="${X + LC / 2}" y="${yb + 46}" fill="#E8ECF2" font-size="9.5" text-anchor="middle">USB</text>`;
+
+    const STYLE = {
+      inter: ['#FFC94A', '#2A2520'], chauffage: ['#FFB570', '#2A2520'], thermo: ['#D9E8EE', '#2A2520'],
+      libre: ['#EEF5F0', '#6E655B'], libreChoix: ['#D7EFE0', '#2E7D4F'], pris: ['#E8E1D5', '#8C8379'],
+      eviter: ['#DDD7CD', '#8C8379'], alim: ['#F6DED3', '#B5532F'], masse: ['#D5D9E0', '#3F4754'], reset: ['#D5D9E0', '#3F4754'],
+      choisie: ['#B5532F', '#FFFFFF']
+    };
+    const broche = (b, i, gauche) => {
+      const [etiq, g, genre, expl] = b;
+      const y = HAUT + i * RH + RH / 2;
+      const occ = g != null ? occupees.get(g) : null;
+      const choisie = choix && g != null && g === selection;
+      let st, libelle, gras = false;
+      if (choisie) { st = STYLE.choisie; libelle = occ ? occ.nom : 'choisie'; gras = true; }
+      else if (occ) { st = choix ? STYLE.pris : STYLE[occ.genre] || STYLE.inter; libelle = occ.nom; gras = !choix; }
+      else if (genre === 'libre') { st = choix ? STYLE.libreChoix : STYLE.libre; libelle = 'libre'; gras = choix; }
+      else if (genre === 'alim') { st = STYLE.alim; libelle = etiq === 'VIN' ? '5 V' : '3,3 V'; gras = true; }
+      else { st = STYLE[genre]; libelle = { eviter: 'à éviter', masse: 'masse', reset: 'redémarrage' }[genre]; }
+
+      let attrs;
+      if (choix) {
+        if (g != null && !occ && genre === 'libre') attrs = `data-val="${g}"`;
+        else if (choisie) attrs = `data-val="${g}"`;
+        else attrs = `data-info="${esc(occ ? `${etiq} est déjà prise par « ${occ.nom} »` : `${etiq} : ${expl}`)}"`;
+      } else attrs = `data-action="info-broche" data-id="${esc(id)}" data-k="${gauche ? 'g' : 'd'}${i}"`;
+
+      const xp = gauche ? X + 12 : X + LC - 12;
+      const xe = gauche ? 4 : X + LC + 6;
+      const le = gauche ? X - 6 - 4 : L - 4 - xe;
+      const xt = gauche ? xe + le - 8 : xe + 8;
+      return `<g class="broche ${choix && attrs.startsWith('data-val') ? 'choisissable' : ''}" ${attrs} tabindex="0" aria-label="${esc(`${etiq} : ${libelle}`)}">
+        <rect x="${gauche ? 0 : X + LC / 2}" y="${y - RH / 2}" width="${gauche ? X + LC / 2 : L - X - LC / 2}" height="${RH}" fill="transparent"/>
+        <line x1="${gauche ? xe + le : X + LC}" y1="${y}" x2="${gauche ? X : xe}" y2="${y}" stroke="${st[0]}" stroke-width="1.5"/>
+        <rect x="${xe}" y="${y - 12}" width="${le}" height="24" rx="7" fill="${st[0]}" ${choisie ? 'stroke="#2A2520" stroke-width="2.5"' : ''}/>
+        <text x="${xt}" y="${y + 4.5}" font-size="13" fill="${st[1]}" ${gras ? 'font-weight="700"' : ''} text-anchor="${gauche ? 'end' : 'start'}">${esc(court(libelle, 15))}</text>
+        <circle cx="${xp}" cy="${y}" r="6" fill="${occ || choisie ? '#F2B53A' : '#1F2733'}" stroke="#F2B53A" stroke-width="2"/>
+        <text x="${gauche ? xp + 10 : xp - 10}" y="${y + 4}" font-size="11" font-family="ui-monospace, Menlo, monospace" font-weight="700" fill="#E8ECF2" text-anchor="${gauche ? 'start' : 'end'}">${etiq}</text>
+      </g>`;
+    };
+    BROCHAGE.gauche.forEach((b, i) => { o += broche(b, i, true); });
+    BROCHAGE.droite.forEach((b, i) => { o += broche(b, i, false); });
+    return `${o}</svg>`;
+  }
   const RESERVES = new Set(['admin', 'wifi', 'config', 'meta', 'version', 'ota', 'availability']);
 
   // Dessins (mêmes tracés que l'appli Android, repère 48 x 48)
@@ -233,7 +338,7 @@
     const { vue, param } = vueCourante();
     const app = $('#app');
     if (accueilRequis()) { app.innerHTML = vueBienvenue(); return; }
-    const vues = { accueil: vueAccueil, reglages: vueReglages, ajouter: vueAjouter, wifi: vueWifi, avance: vueAvance, branche: () => vueBranche(param), carte: vueCarte };
+    const vues = { accueil: vueAccueil, reglages: vueReglages, ajouter: vueAjouter, wifi: vueWifi, avance: vueAvance, branche: () => vueBranche(param), carte: vueCarte, plan: () => vuePlan(param) };
     app.innerHTML = (vues[vue] || vueAccueil)();
   }
 
@@ -271,15 +376,18 @@
       ${lireMaisons().length > 1 ? `<button class="puce-maison" data-action="choisir-maison">${esc(maisonActuelle().nom)} ▾</button>` : ''}</header>`;
     if (!etat.connecte) html += `<p class="bandeau">Pas de connexion Internet pour le moment.<br>Ça revient tout seul, patiente un peu.</p>`;
 
-    const tuiles = [];
-    appareilsTries().forEach((a) => {
+    // Une partie par carte : en-tête (nom, état, plan), puis ce qui y est branché
+    const cartes = appareilsTries();
+    cartes.forEach((a) => {
+      const tuiles = [];
       const utilises = new Set(sorties(a).map((s) => s.capteur).filter(Boolean));
       sorties(a).forEach((s) => tuiles.push(estThermostat(s) ? tuileChauffage(a, s) : tuileSortie(a, s)));
       capteurs(a).filter((c) => !utilises.has(c.id)).forEach((c) => tuiles.push(tuileCapteur(a, c)));
+      html += enteteCarte(a);
+      html += tuiles.length ? `<div class="tuiles">${tuiles.join('')}</div>` : '<p class="rien">Rien de branché pour l\'instant.</p>';
     });
 
-    if (tuiles.length) html += `<div class="tuiles">${tuiles.join('')}</div>`;
-    else if (etat.connecte && etat.pret) {
+    if (!cartes.length && etat.connecte && etat.pret) {
       html += `<p class="texte" style="text-align:center;margin-top:48px">Aucun appareil pour l'instant.</p>
                <button class="gros" data-action="aller" data-vue="ajouter">Ajouter un appareil</button>`;
     }
@@ -287,7 +395,18 @@
     return html;
   }
 
-  function titreTuile(a, sousNom, seul) { return seul ? nom(a) : `${nom(a)} · ${sousNom}`; }
+  function enteteCarte(a) {
+    const n = sorties(a).length + capteurs(a).length;
+    const branches = n === 0 ? 'rien de branché' : n === 1 ? '1 élément branché' : `${n} éléments branchés`;
+    const etatTxt = a.enLigne === true ? `● En marche · ${branches}` : "● Ne répond pas · vérifie qu'elle est branchée";
+    return `<button class="entete-carte" data-action="aller" data-vue="plan" data-param="${esc(a.id)}" aria-label="${esc(nom(a))}. Ouvrir le plan de la carte">
+      <svg class="puce" viewBox="0 0 24 24" aria-hidden="true"><path d="${PUCE}"/></svg>
+      <span class="textes"><b>${esc(nom(a))}</b><small class="${a.enLigne === true ? 'ok' : 'alerte'}">${etatTxt}</small></span>
+      <span class="vers-plan">Plan ›</span>
+    </button>`;
+  }
+  const PUCE = 'M7,5h10a2,2 0 0,1 2,2v10a2,2 0 0,1 -2,2h-10a2,2 0 0,1 -2,-2v-10a2,2 0 0,1 2,-2z M9,9v6h6v-6z M8,1h2v3h-2z M14,1h2v3h-2z M8,20h2v3h-2z M14,20h2v3h-2z M1,8h3v2h-3z M1,14h3v2h-3z M20,8h3v2h-3z M20,14h3v2h-3z';
+  const ligneBroche = (pin, extra = '') => (pin != null && pin >= 0 ? `<span class="broche-txt">Broche ${nomBroche(pin)}${extra}</span>` : '');
 
   function lireAttente(map, cle, reel, delai) {
     const att = map.get(cle);
@@ -302,13 +421,13 @@
     const texte = a.enLigne !== true ? 'Ne répond pas'
       : !etat.connecte ? "En attente d'Internet"
         : allume === true ? 'Allumé' : allume === false ? 'Éteint' : '…';
-    const titre = titreTuile(a, s.nom, sorties(a).length === 1);
+    const titre = s.nom;
     return `<button class="tuile sortie ${joignable && allume === true ? 'on' : ''} ${joignable ? '' : 'absent'}"
         data-action="basculer" data-id="${esc(a.id)}" data-s="${esc(s.id)}" aria-pressed="${allume === true}"
         aria-label="${esc(titre)}, ${esc(texte)}">
       <span class="rond">${dessin(icone(a, s.id))}</span>
       <span class="textes"><span class="nom">${esc(titre)}</span>
-      <span class="etat ${a.enLigne !== true ? 'alerte' : ''}">${texte}</span></span>
+      <span class="etat ${a.enLigne !== true ? 'alerte' : ''}">${texte}</span>${ligneBroche(s.pin)}</span>
     </button>`;
   }
 
@@ -322,6 +441,7 @@
     const chauffe = a.chauffe[s.id] === true;
     const m = s.capteur ? a.mesures[s.capteur] : null;
     const temp = m && m.t != null ? m.t : null;
+    const thermoPin = s.capteur ? (capteurs(a).find((c) => c.id === s.capteur) || {}).pin : null;
 
     const texte = a.enLigne !== true ? 'Ne répond pas'
       : !etat.connecte ? "En attente d'Internet"
@@ -333,8 +453,8 @@
     return `<div class="tuile chauffage ${classe} ${joignable ? '' : 'absent'}">
       <div class="ligne">
         <span class="rond">${dessin('flamme')}</span>
-        <span class="textes"><span class="nom">${esc(titreTuile(a, s.nom, sorties(a).length === 1))}</span>
-        <span class="etat ${a.enLigne !== true ? 'alerte' : ''}">${texte}</span></span>
+        <span class="textes"><span class="nom">${esc(s.nom)}</span>
+        <span class="etat ${a.enLigne !== true ? 'alerte' : ''}">${texte}</span>${ligneBroche(s.pin, thermoPin != null && thermoPin >= 0 ? ` · thermomètre ${nomBroche(thermoPin)}` : '')}</span>
         <span class="valeur">${temp == null ? '—' : degres(Math.round(temp * 10) / 10)}</span>
       </div>
       <div class="reglage">
@@ -349,11 +469,10 @@
 
   function tuileCapteur(a, c) {
     const m = a.mesures[c.id];
-    const seul = capteurs(a).length === 1 && sorties(a).length === 0;
     const sous = a.enLigne !== true ? 'Ne répond pas' : m && m.h != null ? `Humidité ${Math.round(m.h)} %` : '';
     return `<div class="tuile capteur ${a.enLigne === true ? '' : 'absent'}">
       <span class="rond">${dessin('thermo')}</span>
-      <span class="textes"><span class="nom">${esc(titreTuile(a, c.nom, seul))}</span><span class="sous">${sous}</span></span>
+      <span class="textes"><span class="nom">${esc(c.nom)}</span><span class="sous">${sous}</span>${ligneBroche(c.pin)}</span>
       <span class="valeur">${m && m.t != null ? `${Math.round(m.t)}°` : '—'}</span>
     </div>`;
   }
@@ -776,7 +895,12 @@
   // Ce qui est branché (éditeur visuel)
   // ------------------------------------------------------------------
   let edition = null; // { id, elements: [...], prochaine }
-  const LIB_TYPE = { inter: 'Interrupteur', chauffage: 'Chauffage', thermo: 'Thermomètre' };
+  // Les trois parties de l'éditeur, dans cet ordre
+  const PARTIES = [
+    { type: 'inter', titre: 'Lumières et prises', aide: 'Un relais par lumière ou prise.', ajouter: '+ Ajouter une lumière ou une prise', dessin: 'lampe' },
+    { type: 'chauffage', titre: 'Chauffage', aide: 'Le relais branché sur la chaudière.', ajouter: '+ Ajouter un chauffage', dessin: 'flamme' },
+    { type: 'thermo', titre: 'Thermomètres', aide: 'Un DHT22 (ou DHT11) par pièce.', ajouter: '+ Ajouter un thermomètre', dessin: 'thermo' }
+  ];
   const NOM_DEFAUT = { inter: 'Lumière', chauffage: 'Chauffage', thermo: 'Température' };
 
   function chargerEdition(a) {
@@ -798,21 +922,15 @@
     if (!a) return `${barre('Ce qui est branché')}<p class="texte">Appareil introuvable.</p>`;
     if (!edition || edition.id !== id) chargerEdition(a);
     return `${barre(`Branché sur « ${nom(a)} »`)}
-      <p class="bandeau" style="font-size:15px;margin-top:0">Module relais : VCC → VIN (5 V), GND → GND, IN → la broche choisie.<br>
-        Thermomètre DHT22 : + → 3V3, − → GND, OUT → la broche choisie.<br>
-        Le numéro de broche est écrit sur la carte (D26, G26 ou IO26 = 26).</p>
       <div id="elements">${htmlElements()}</div>
-      <button class="gros clair" style="margin-top:16px" data-action="ajouter-el">+ Ajouter un élément</button>
-      <button class="gros" style="margin-top:12px" data-action="enregistrer-el">Enregistrer (l'appareil redémarre)</button>`;
+      <button class="gros" style="margin-top:28px" data-action="enregistrer-el">Enregistrer (l'appareil redémarre)</button>`;
   }
 
   function htmlElements() {
     const thermos = edition.elements.filter((e) => e.type === 'thermo');
-    return edition.elements.map((e) => {
-      const segs = Object.keys(LIB_TYPE).map((tp) => `<button class="${e.type === tp ? 'actif' : ''}" data-action="type-el" data-cle="${e.cle}" data-t="${tp}">${LIB_TYPE[tp]}</button>`).join('');
-      const broches = BROCHES.map((p) => `<option value="${p}" ${e.pin === p ? 'selected' : ''}>${p === 2 ? '2 (LED bleue de la carte)' : p}</option>`).join('');
+    const htmlElement = (e) => {
       let extra = '';
-      if (e.type !== 'thermo') {
+      if (e.type !== 'thermo' && e.pin !== 2) {
         extra += `<label class="case"><input type="checkbox" data-champ="inverse" data-cle="${e.cle}" ${e.inverse ? 'checked' : ''}> Logique inversée</label>
           <p class="aide">Le relais s'enclenche quand la broche est à 0. À cocher pour la plupart des modules relais (bleus).</p>`;
       }
@@ -832,15 +950,57 @@
           </select>`;
       }
       return `<div class="element">
-        <div class="segments">${segs}</div>
         <label>Nom affiché</label>
         <input data-champ="nom" data-cle="${e.cle}" value="${esc(e.nom)}" placeholder="ex : Lampe du salon" autocapitalize="sentences">
-        <label>Broche</label>
-        <select data-champ="pin" data-cle="${e.cle}"><option value="">Choisir…</option>${broches}</select>
+        <button class="choix-broche" data-action="choisir-broche" data-cle="${e.cle}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="${PUCE}"/></svg>
+          ${e.pin == null ? 'Choisir la broche sur la carte' : `Broche <b>${nomBroche(e.pin)}</b> · changer`}</button>
+        <p class="aide branchement">${esc(branchement(e.type, e.pin))}</p>
         ${extra}
         <button class="supprimer" data-action="suppr-el" data-cle="${e.cle}">Supprimer</button>
       </div>`;
+    };
+    return PARTIES.map((p, i) => {
+      const liste = edition.elements.filter((e) => e.type === p.type);
+      return `<section class="partie ${i === 0 ? 'premiere' : ''}">
+        <h2><span class="rond-petit">${dessin(p.dessin)}</span>${p.titre}</h2>
+        <p class="aide">${p.aide}</p>
+        ${liste.length ? liste.map(htmlElement).join('') : '<p class="rien">Rien pour l\'instant.</p>'}
+        <button class="gros clair ajouter" data-action="ajouter-el" data-t="${p.type}">${p.ajouter}</button>
+      </section>`;
     }).join('');
+  }
+
+  /** Les broches prises par les autres éléments (même pas encore enregistrés). */
+  function autresOccupants(e) {
+    const m = new Map();
+    edition.elements.filter((x) => x !== e && x.pin != null)
+      .forEach((x) => m.set(x.pin, { nom: x.nom || NOM_DEFAUT[x.type], genre: x.type }));
+    return m;
+  }
+
+  async function choisirBroche(e) {
+    const occupees = autresOccupants(e);
+    if (e.pin != null) occupees.set(e.pin, { nom: e.nom || NOM_DEFAUT[e.type], genre: e.type });
+    const { val } = await modale({
+      titre: `Broche de « ${e.nom || NOM_DEFAUT[e.type]} »`,
+      html: `<p class="aide" style="margin:0 0 10px;font-size:16px">Touche une broche en vert. Les grises sont déjà prises ou à éviter.</p>
+        ${svgCarte({ occupees, selection: e.pin, choix: true })}`,
+      boutons: [{ texte: 'Annuler', val: null }]
+    });
+    if (val == null || val === '') return;
+    e.pin = Number(val);
+    if (e.pin === 2) e.inverse = false;   // la LED de la carte s'allume à 1
+    majElements();
+  }
+
+  function nouveauNom(type) {
+    const base = NOM_DEFAUT[type];
+    const pris = new Set(edition.elements.map((x) => x.nom.trim()));
+    if (!pris.has(base)) return base;
+    let n = 2;
+    while (pris.has(`${base} ${n}`)) n++;
+    return `${base} ${n}`;
   }
 
   const elementParCle = (cle) => edition && edition.elements.find((e) => e.cle === Number(cle));
@@ -879,7 +1039,8 @@
       led_statut: broches.includes(2) ? null : 2,
       bouton: 0
     };
-    els.forEach((e) => {
+    const ordre = { inter: 0, chauffage: 1, thermo: 2 };
+    [...els].sort((x, y) => ordre[x.type] - ordre[y.type]).forEach((e) => {
       if (e.type === 'thermo') config.capteurs.push({ id: e.id, nom: e.nom.trim(), type: e.modele, pin: e.pin });
       else {
         const o = { id: e.id, nom: e.nom.trim(), pin: e.pin, inverse: e.inverse };
@@ -899,6 +1060,52 @@
     toast("Envoyé, l'appareil redémarre");
     edition = null;
     retour();
+  }
+
+  // ------------------------------------------------------------------
+  // Plan d'une carte : dessin, et comment chaque élément est branché
+  // ------------------------------------------------------------------
+  function branchesDe(a) {
+    const l = [];
+    sorties(a).filter((s) => s.pin != null && s.pin >= 0).forEach((s) => {
+      const th = capteurs(a).find((c) => c.id === s.capteur);
+      const genre = genreSortie(s);
+      const detail = th ? `Chauffage réglé par le thermomètre « ${th.nom} ».`
+        : genre === 'chauffage' ? 'Chauffage en marche / arrêt, sans thermomètre.'
+          : s.inverse ? 'Relais à logique inversée (la plupart des modules relais bleus).' : '';
+      l.push({ nom: s.nom, genre, pin: s.pin, detail });
+    });
+    capteurs(a).filter((c) => c.pin != null && c.pin >= 0)
+      .forEach((c) => l.push({ nom: c.nom, genre: 'thermo', pin: c.pin, detail: `Modèle ${(c.type || 'dht22').toUpperCase()}.` }));
+    return l;
+  }
+
+  function vuePlan(id) {
+    const a = etat.appareils.get(id);
+    if (!a) return `${barre('Plan de la carte')}<p class="texte">Carte introuvable.</p>`;
+    const liste = a.config ? branchesDe(a) : [];
+    const occupees = new Map(liste.map((b) => [b.pin, { nom: b.nom, genre: b.genre }]));
+    const legende = [['Lumière ou prise', '#E0A400'], ['Chauffage', '#E07B2C'], ['Thermomètre', '#5B9BB0'], ['Libre', '#2E7D4F'], ['À éviter', '#9A9187']]
+      .map(([t, c]) => `<span class="pastille"><i style="background:${c}"></i>${t}</span>`).join('');
+    return `${barre(`Plan de « ${nom(a)} »`)}
+      <p class="${a.enLigne === true ? 'ok' : 'alerte'}" style="margin:0;font-size:18px">${a.enLigne === true ? `● En marche${a.version ? ` · logiciel v${esc(a.version)}` : ''}` : '● Ne répond pas en ce moment'}</p>
+      <p class="legende">${legende}</p>
+      <p class="aide" style="margin-top:4px">Touche une broche pour savoir à quoi elle sert.</p>
+      ${svgCarte({ occupees, id })}
+      <h2 class="titre-section">Comment c'est branché</h2>
+      ${liste.length ? liste.map((b) => `<div class="branche ${b.genre}"><b>${esc(b.nom)} · ${nomBroche(b.pin)}</b>
+        <p>${esc(branchement(b.genre, b.pin))}${b.detail ? `\n${esc(b.detail)}` : ''}</p></div>`).join('')
+        : '<p class="rien">Rien n\'est encore branché sur cette carte.</p>'}
+      <button class="gros clair" style="margin-top:24px" data-action="aller" data-vue="branche" data-param="${esc(a.id)}">Modifier ce qui est branché</button>`;
+  }
+
+  function infoBroche(id, k) {
+    const b = (k[0] === 'g' ? BROCHAGE.gauche : BROCHAGE.droite)[Number(k.slice(1))];
+    const a = etat.appareils.get(id);
+    if (!b || !a) return;
+    const br = b[1] != null ? branchesDe(a).find((x) => x.pin === b[1]) : null;
+    if (br) modale({ titre: `${b[0]} : ${br.nom}`, html: `<p style="white-space:pre-line">${esc(branchement(br.genre, br.pin))}</p>`, boutons: [{ texte: 'OK', val: null, classe: 'principal' }] });
+    else toast(`${b[0]} : ${b[3]}`);
   }
 
   // ------------------------------------------------------------------
@@ -1140,7 +1347,11 @@
       };
       fond.addEventListener('click', (e) => {
         const b = e.target.closest('[data-i]');
+        const choix = e.target.closest('[data-val]');     // broche choisie sur le dessin de la carte
+        const info = e.target.closest('[data-info]');     // broche prise ou à éviter : on explique
         if (b) fermer(boutons[Number(b.dataset.i)].val);
+        else if (choix) fermer(choix.dataset.val);
+        else if (info) toast(info.dataset.info);
         else if (e.target === fond) fermer(null);
       });
       const champ = fond.querySelector('input:not([type=checkbox]),textarea');
@@ -1164,7 +1375,9 @@
     if (!el || el.disabled) return;
     const { action, id, s, vue, cle } = el.dataset;
     switch (action) {
-      case 'aller': aller(vue); break;
+      case 'aller': aller(vue, el.dataset.param); break;
+      case 'info-broche': infoBroche(id, el.dataset.k); break;
+      case 'choisir-broche': { const x = elementParCle(cle); if (x) choisirBroche(x); break; }
       case 'retour': retour(); break;
       case 'basculer': basculer(id, s); break;
       case 'consigne': changerConsigne(id, s, Number(el.dataset.v)); break;
@@ -1180,26 +1393,19 @@
       case 'connecter-carte': connecterCarte(); break;
       case 'installer-tout': preparerCarte(true); break;
       case 'installer-logiciel': preparerCarte(false); break;
-      case 'ajouter-el':
-        edition.elements.push({ cle: edition.prochaine++, id: null, type: 'inter', nom: NOM_DEFAUT.inter, pin: null, inverse: true, capteur: null, modele: 'dht22' });
+      case 'ajouter-el': {
+        const tp = el.dataset.t || 'inter';
+        const x = { cle: edition.prochaine++, id: null, type: tp, nom: nouveauNom(tp), pin: null, inverse: tp !== 'thermo', capteur: null, modele: 'dht22' };
+        edition.elements.push(x);
         majElements();
-        setTimeout(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }), 50);
+        choisirBroche(x);   // on passe directement au choix de la broche
         break;
+      }
       case 'suppr-el': {
         const supprime = elementParCle(cle);
         edition.elements = edition.elements.filter((x) => x !== supprime);
         edition.elements.forEach((x) => { if (x.capteur === supprime.cle) x.capteur = null; });
         majElements();
-        break;
-      }
-      case 'type-el': {
-        const x = elementParCle(cle);
-        const tp = el.dataset.t;
-        if (x && x.type !== tp) {
-          if (!x.nom.trim() || x.nom === NOM_DEFAUT[x.type]) x.nom = NOM_DEFAUT[tp];
-          x.type = tp;
-          majElements();
-        }
         break;
       }
       case 'enregistrer-el': enregistrerElements(); break;
@@ -1218,10 +1424,7 @@
     const x = el.dataset && el.dataset.cle ? elementParCle(el.dataset.cle) : null;
     if (!x) return;
     const champ = el.dataset.champ;
-    if (champ === 'pin') {
-      x.pin = el.value === '' ? null : Number(el.value);
-      if (x.pin === 2) { x.inverse = false; majElements(); }
-    } else if (champ === 'inverse') x.inverse = el.checked;
+    if (champ === 'inverse') x.inverse = el.checked;
     else if (champ === 'modele') x.modele = el.value;
     else if (champ === 'capteur') { x.capteur = el.value === '' ? null : Number(el.value); majElements(); }
     else if (champ === 'nom') { x.nom = el.value; if (x.type === 'thermo') majElements(); }
